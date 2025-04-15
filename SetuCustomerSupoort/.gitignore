@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv/
+venv/
+
+
+
+# Project specific
+data/
+chroma_db/
+*.db
+*.key
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Virtual Environment
+.env
+.venv
+ENV/
+
+# IDE specific files
+.DS_Store
+
+# Project specific
+product_docs.json
+*.sqlite
+*.sqlite3
+secrets.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# mypy
+.mypy_cache/
+
+# pytest
+.pytest_cache/
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Database
+data/secrets.db
+
+# Secrets and keys
+data/secret.key 
