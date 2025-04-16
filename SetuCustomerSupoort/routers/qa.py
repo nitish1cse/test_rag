@@ -74,41 +74,65 @@ def get_qa_chain(product: str):
             openai_api_key=api_key
         )
 
-        # Initialize vector store
-        vectorstore = Chroma(
-            persist_directory=os.path.join("chroma_db", product),
-            embedding_function=embeddings
-        )
-
-        # Create a product-specific prompt template
-        prompt_template = get_product_prompt_template(product)
-
-        # Initialize memory and retriever
+        # Use the VectorStore already initialized at module level
+        # This will access all documents, including GitHub and Confluence
+        retriever = vector_store.search
+        
+        # Create memory
         memory = ConversationBufferMemory(
             memory_key="chat_history",
             return_messages=True,
             output_key="answer"
         )
         
-        # Use more results for better coverage
-        retriever = vectorstore.as_retriever(
-            search_kwargs={
-                "k": 15,  # Increased from 10 to 15
-                "filter": {"product": product}
-            }
-        )
+        # Create a product-specific prompt template
+        prompt_template = get_product_prompt_template(product)
 
-        # Create the conversation chain
-        conversation_chain = ConversationalRetrievalChain.from_llm(
+        # Custom implementation of ConversationalRetrievalChain to use our VectorStore
+        class CustomConversationalChain:
+            def __init__(self, llm, retriever, memory, prompt_template, product):
+                self.llm = llm
+                self.retriever = retriever
+                self.memory = memory
+                self.prompt_template = prompt_template
+                self.product = product
+                self.history = []
+                
+            def invoke(self, inputs):
+                question = inputs["question"]
+                
+                # Add to history
+                if "chat_history" in inputs:
+                    self.history = inputs["chat_history"]
+                
+                # Get documents from retriever
+                docs = self.retriever(question, self.product, k=15)
+                
+                # Format context from documents
+                context = "\n\n".join([doc.page_content for doc in docs])
+                
+                # Format prompt with context and question
+                formatted_prompt = self.prompt_template.format(
+                    context=context,
+                    question=question
+                )
+                
+                # Generate answer using LLM
+                answer = self.llm.predict(formatted_prompt)
+                
+                # Return answer and source documents
+                return {
+                    "answer": answer,
+                    "source_documents": docs
+                }
+
+        return CustomConversationalChain(
             llm=llm,
             retriever=retriever,
             memory=memory,
-            return_source_documents=True,
-            output_key="answer",
-            combine_docs_chain_kwargs={"prompt": prompt_template}
+            prompt_template=prompt_template,
+            product=product
         )
-
-        return conversation_chain
     except Exception as e:
         logger.error(f"Error initializing QA chain: {e}")
         raise
@@ -116,45 +140,44 @@ def get_qa_chain(product: str):
 def get_product_prompt_template(product: str) -> PromptTemplate:
     """Get a product-specific prompt template"""
     base_template = """
-You are a helpful assistant trained on {product} documentation.
-
-Use the following context to answer the question. Be specific and concise.
-Only answer based on the context provided. If the context doesn't contain the answer, say "I don't have enough information to answer this question."
-Format your response using markdown for better readability.
-Use bullet points, headers, and code blocks when appropriate.
-
-Context:
+You are a helpful human support assistant from Setu who specializes in {product}.
+Use the following reference information to answer the question:
 {context}
+
 
 Question:
 {question}
 
-Answer:
 """
-    
+
     # Product-specific templates
     if product == "UMAP":
         template = """
-You are a helpful assistant trained on Setu's UPI Setu (UMAP) documentation.
+You are a helpful human support assistant at Setu who specializes in UPI Setu (UMAP) integration.
 
-Use the following context to accurately answer questions about UMAP, including merchant onboarding, payment processing, and API integration.
-Pay special attention to merchant onboarding steps and procedures when they are asked about.
-Be specific, concise and accurate in your responses.
 
-If you're asked about steps to onboard a merchant, be sure to provide the complete step-by-step process from the documentation.
-Use clear numbered steps and provide all relevant API endpoints when discussing the merchant onboarding process.
 
-Only answer based on the context provided. If the context doesn't contain the answer, say "I don't have enough information to answer this question."
-Format your response using markdown for better readability.
-Use bullet points, headers, and code blocks when appropriate.
 
-Context:
 {context}
 
 Question:
 {question}
 
-Answer:
+Your helpful human response:
+"""
+    elif product == "ACCOUNT_AGGREGATOR":
+        template = """
+You are a helpful human support assistant at Setu who specializes in Account Aggregator.
+
+
+
+Use the following reference information to answer their question:
+{context}
+
+Question:
+{question}
+
+Your helpful human response:
 """
     else:
         template = base_template.replace("{product}", product)
@@ -254,135 +277,62 @@ async def get_feedback(question: str):
 @router.post("/ask/stream")
 async def ask_question_stream(request: QuestionRequest):
     """Ask a question about a product's documentation with streaming response"""
-    
-    async def generate_stream() -> AsyncGenerator[str, None]:
-        """Generate a streaming response."""
-        try:
-            # Check if the product exists
-            product_dir = os.path.join("chroma_db", request.product)
-            if not os.path.exists(product_dir):
-                yield f"No documentation found for product '{request.product}'. Please check the product name or add documentation first."
-                # Send metadata at the end
-                yield json.dumps({"sources": []})
-                return
+    try:
+        # Check if the product exists
+        product_dir = os.path.join("chroma_db", request.product)
+        if not os.path.exists(product_dir):
+            # Create an error generator instead of trying to return from inside yield
+            async def error_generator():
+                error_message = (f"No documentation found for product '{request.product}'. "
+                             f"Please check the product name or add documentation first.")
+                yield error_message
+                yield f'\n\n{{"sources": []}}'
                 
-            # Get OpenAI API key
-            api_key = retrieve_secret("OPENAI_API_KEY")
-            if not api_key:
-                yield "Error: OpenAI API key not configured."
-                yield json.dumps({"sources": []})
-                return
-
-            # Initialize embeddings and LLM with streaming
-            embeddings = OpenAIEmbeddings(
-                model="text-embedding-3-small",
-                openai_api_key=api_key
-            )
+            return StreamingResponse(error_generator(), media_type="text/plain")
             
-            # Use streaming LLM
-            llm = ChatOpenAI(
-                model_name="gpt-4-turbo-preview",
-                temperature=0.7,
-                streaming=True,
-                openai_api_key=api_key
-            )
+        # Get QA chain for the product
+        conversation_chain = get_qa_chain(request.product)
 
-            # Initialize vector store
-            vectorstore = Chroma(
-                persist_directory=os.path.join("chroma_db", request.product),
-                embedding_function=embeddings
-            )
-            
-            # Get retriever with product filter to ensure we only use this product's data
-            retriever = vectorstore.as_retriever(
-                search_kwargs={
-                    "k": 10,
-                    "filter": {"product": request.product}
-                }
-            )
-            
-            # Get relevant documents
-            docs = retriever.get_relevant_documents(request.question)
-            
-            # Filter documents to ensure product match
-            valid_docs = []
-            for doc in docs:
-                doc_product = doc.metadata.get("product", "")
-                if doc_product == request.product or not doc_product:
-                    valid_docs.append(doc)
-            
-            # Prepare context from documents
-            context = "\n\n".join([doc.page_content for doc in valid_docs])
-            
-            # Format the prompt with markdown
-            prompt = f"""
-You are Setu Assistant, a helpful AI trained on {request.product} documentation.
-
-Use the following context to answer the question.
-Format your response using markdown for better readability.
-Use bullet points, headers, and code blocks when appropriate.
-If you cannot answer based on the context, say so.
-Be accurate, helpful and concise.
-
-Context:
-{context}
-
-Question:
-{request.question}
-
-Answer:
-"""
-            
-            # Prepare sources metadata for later
-            source_titles = [
-                {
-                    "title": doc.metadata.get("title", "Unknown"),
-                    "page_id": doc.metadata.get("page_id", "Unknown"),
-                    "type": doc.metadata.get("type", "Unknown"),
-                    "product": doc.metadata.get("product", request.product)
-                }
-                for doc in valid_docs if doc.metadata.get("title")
-            ]
-            
-            # If no valid documents found
-            if not valid_docs:
-                # Generate a more helpful response with markdown formatting
-                no_docs_response = f"""## No Information Found
-
-I don't have any information about '{request.product}' to answer your question.
-
-Please try:
-- Checking if you selected the correct product
-- Adding documentation for this product first
-- Asking about a different topic
-
-If you believe this is an error, please contact support."""
+        # Log the question for debugging
+        logger.info(f"Processing streaming question for product '{request.product}': {request.question}")
+        
+        async def generate_stream() -> AsyncGenerator[str, None]:
+            try:
+                # Get result but not streaming part yet
+                result = conversation_chain.invoke({
+                    "question": request.question
+                })
                 
-                yield no_docs_response
-                # Add a small delay before sending metadata to ensure proper separation
-                await asyncio.sleep(0.1)
-                yield json.dumps({"sources": []})
-                return
-            
-            # Stream the response chunks
-            response_chunks = []
-            async for chunk in llm.astream(prompt):
-                chunk_text = chunk.content
-                response_chunks.append(chunk_text)
-                yield chunk_text
-                # Small delay to simulate natural typing
-                await asyncio.sleep(0.01)
-            
-            # At the end, send the sources metadata as a JSON chunk
-            await asyncio.sleep(0.1)  # Add a small delay before sending metadata
-            yield json.dumps({"sources": source_titles})
-            
-        except Exception as e:
-            logger.error(f"Error in streaming response: {e}")
-            yield f"\n\nError: {str(e)}"
-            yield json.dumps({"sources": []})
-    
-    return StreamingResponse(
-        generate_stream(),
-        media_type="text/event-stream"
-    )
+                # Extract answer and process
+                answer = result["answer"]
+                
+                # Yield the answer for streaming
+                yield answer
+                
+                # After streaming the content, send the sources as JSON
+                sources = result.get("source_documents", [])
+                
+                # Format the sources as needed
+                source_titles = [
+                    {
+                        "title": doc.metadata.get("title", "Unknown"),
+                        "page_id": doc.metadata.get("page_id", "Unknown"),
+                        "type": doc.metadata.get("type", "URL" if doc.metadata.get("url") else "Unknown"),
+                        "product": doc.metadata.get("product", request.product),
+                        "url": doc.metadata.get("url", "")
+                    }
+                    for doc in sources if doc.metadata.get("title") or doc.metadata.get("url")
+                ]
+                
+                # Yield the sources as JSON
+                yield f'\n\n{{"sources": {json.dumps(source_titles)}}}'
+                
+            except Exception as e:
+                logger.error(f"Error in stream generation: {e}")
+                yield f"Error generating answer: {str(e)}"
+        
+        return StreamingResponse(generate_stream(), media_type="text/plain")
+        
+    except Exception as e:
+        logger.error(f"Error processing streaming question: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

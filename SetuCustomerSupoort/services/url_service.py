@@ -343,6 +343,18 @@ class URLDocStore:
             # Add chunks to vectorstore
             vectorstore.add_documents(chunks)
             
+            # Also add to the central VectorStore used by QA
+            from services.vectorstore import VectorStore
+            qa_vectorstore = VectorStore()
+            
+            # Ensure all chunks have the product metadata
+            for chunk in chunks:
+                if 'product' not in chunk.metadata:
+                    chunk.metadata['product'] = product
+            
+            # Add to the QA vectorstore
+            qa_vectorstore.add_documents(chunks, product)
+            
             logger.info(f"Added {len(chunks)} chunks to vectorstore for product {product}")
             return len(chunks)
             
