@@ -5,7 +5,7 @@ from bs4 import BeautifulSoup
 import requests
 from langchain_core.documents import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
 from services.secret_store import retrieve_secret
 import hashlib
@@ -44,6 +44,34 @@ class URLDocStore:
         self.max_urls_per_domain = 100  # Maximum URLs to process per domain
         
         logger.info(f"Initialized URLDocStore at {self.chroma_dir}")
+
+    def get_vectorstore(self, product: str) -> Chroma:
+        """Get or create a Chroma vectorstore for a specific product"""
+        try:
+            api_key = retrieve_secret("OPENAI_API_KEY")
+            if not api_key:
+                logger.error("OpenAI API key not configured")
+                raise ValueError("OpenAI API key not configured")
+                
+            embeddings = OpenAIEmbeddings(
+                model="text-embedding-3-small",
+                openai_api_key=api_key
+            )
+            
+            product_dir = os.path.join(self.chroma_dir, product)
+            os.makedirs(product_dir, exist_ok=True)
+            
+            vectorstore = Chroma(
+                persist_directory=product_dir,
+                embedding_function=embeddings
+            )
+            
+            logger.info(f"Retrieved vectorstore for product {product}")
+            return vectorstore
+            
+        except Exception as e:
+            logger.error(f"Error getting vectorstore for product {product}: {e}")
+            raise
 
     def get_url_hash(self, url: str) -> str:
         """Generate a unique hash for a URL"""
@@ -299,17 +327,105 @@ class URLDocStore:
         
         return documents
 
-    def store_urls(self, product: str, urls: List[str]) -> Dict:
-        """Store URL content in ChromaDB"""
+    def add_document_to_vectorstore(self, document: Document, product: str) -> int:
+        """Add a single document to the vector store and return number of chunks created"""
+        try:
+            # Split document into chunks
+            chunks = self.text_splitter.split_documents([document])
+            
+            if not chunks:
+                logger.warning(f"No chunks created for document: {document.metadata.get('url', 'unknown')}")
+                return 0
+                
+            # Get the vectorstore for this product
+            vectorstore = self.get_vectorstore(product)
+            
+            # Add chunks to vectorstore
+            vectorstore.add_documents(chunks)
+            
+            logger.info(f"Added {len(chunks)} chunks to vectorstore for product {product}")
+            return len(chunks)
+            
+        except Exception as e:
+            logger.error(f"Error adding document to vectorstore: {e}")
+            return 0
+            
+    def detect_product_from_content(self, content: str) -> Optional[str]:
+        """Detect the product from the content using keyword matching"""
+        try:
+            # Get all available products
+            from services.product_service import product_service
+            all_products = product_service.get_all_products()
+            
+            # Product keyword mappings - map keywords to products
+            product_keywords = {
+                # Banking products
+                "ACCOUNT": ["account", "saving", "bank account", "account statement"],
+                "PAYMENT": ["payment", "pay", "transfer", "transaction"],
+                "FD": ["fixed deposit", "fd", "deposit"],
+                
+                # Payment products
+                "UPI": ["upi", "unified payment", "upi payment", "upi transaction"],
+                "UMAP": ["umap", "merchant", "merchant onboarding", "merchant payment"],
+                "BILLPAY": ["bill", "bill payment", "utility bill", "recharge"],
+                
+                # Data products
+                "ACCOUNT_AGGREGATOR": ["account aggregator", "aa", "data sharing", "consent", "fi data"],
+                "SANDBOX": ["sandbox", "testing", "test mode", "test environment"],
+                
+                # Lending products
+                "OCEN": ["ocen", "loan", "credit", "lending", "lender"],
+                "SETTLEMENTS": ["settlement", "disburse", "disbursement", "neft", "imps", "rtgs"],
+                "ESCROW": ["escrow", "trustee", "trusted"],
+                
+                # Common or other products
+                "KYC": ["kyc", "know your customer", "onboard", "verification", "verify"]
+            }
+            
+            # Count occurrences of keywords for each product
+            product_scores = {product: 0 for product in all_products}
+            
+            # For each product's keywords, check if they exist in the content
+            for product, keywords in product_keywords.items():
+                if product in all_products:  # Only consider valid products
+                    for keyword in keywords:
+                        # Count occurrences (case-insensitive)
+                        count = content.lower().count(keyword.lower())
+                        product_scores[product] += count
+            
+            # Get the product with the highest score
+            best_match = max(product_scores.items(), key=lambda x: x[1], default=(None, 0))
+            
+            # Return the product if score is above threshold
+            if best_match[1] > 0:
+                logger.info(f"Detected product {best_match[0]} with score {best_match[1]}")
+                return best_match[0]
+            
+            # Fallback: try to find exact product names in the content
+            for product in all_products:
+                if product.lower() in content.lower():
+                    logger.info(f"Detected product {product} by direct name match")
+                    return product
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error detecting product from content: {e}")
+            return None
+
+    def store_urls(self, urls: List[str], default_product: str = None) -> Dict:
+        """Store URL content in ChromaDB with automatic product detection"""
         try:
             all_documents = []
+            product_document_map = {}  # Maps products to their documents
             failed_urls = []
             processing_stats = {
                 "total_urls": len(urls),
                 "successful": 0,
                 "failed": 0,
                 "chunks_stored": 0,
-                "pages_processed": 0
+                "pages_processed": 0,
+                "products_detected": {}
             }
             
             # Process each starting URL
@@ -318,11 +434,29 @@ class URLDocStore:
                     visited = set()
                     documents = self.fetch_url_content(url, visited=visited)
                     
-                    # Add product metadata to all documents
-                    for doc in documents:
-                        doc.metadata["product"] = product
-                        
                     if documents:
+                        # Group documents by detected product
+                        for doc in documents:
+                            # Get content and detect product
+                            content = doc.page_content
+                            detected_product = self.detect_product_from_content(content)
+                            
+                            # Use detected product or fall back to default
+                            product = detected_product or default_product or "UMAP"
+                            
+                            # Add product metadata
+                            doc.metadata["product"] = product
+                            doc.metadata["detected_product"] = detected_product  # Store the detected product separately
+                            
+                            # Initialize product in document map if needed
+                            if product not in product_document_map:
+                                product_document_map[product] = []
+                                processing_stats["products_detected"][product] = 0
+                            
+                            # Add document to the product group
+                            product_document_map[product].append(doc)
+                            processing_stats["products_detected"][product] += 1
+                        
                         all_documents.extend(documents)
                         processing_stats["successful"] += 1
                         processing_stats["pages_processed"] += len(documents)
@@ -343,43 +477,65 @@ class URLDocStore:
                     "failed": failed_urls
                 }
 
-            # Split documents into chunks
-            chunks = self.text_splitter.split_documents(all_documents)
-            
-            # Ensure all chunks have product information
-            for chunk in chunks:
-                if "product" not in chunk.metadata:
-                    chunk.metadata["product"] = product
-            
-            # Store chunks in the main product directory (not _urls subfolder)
-            # This ensures both URL and Confluence content are searched together
-            main_vectorstore = Chroma(
-                persist_directory=os.path.join(self.chroma_dir, product),
-                embedding_function=self.embeddings
+            # Get OpenAI API key for embeddings
+            api_key = retrieve_secret("OPENAI_API_KEY")
+            embeddings = OpenAIEmbeddings(
+                model="text-embedding-3-small",
+                openai_api_key=api_key
             )
             
-            # Also store in the product_urls directory for backup/separate access
-            url_vectorstore = Chroma(
-                persist_directory=os.path.join(self.chroma_dir, f"{product}_urls"),
-                embedding_function=self.embeddings
-            )
+            # Process each product group
+            total_chunks = 0
+            
+            for product, documents in product_document_map.items():
+                # Skip if no documents for this product
+                if not documents:
+                    continue
+                    
+                logger.info(f"Processing {len(documents)} documents for product {product}")
+                
+                # Split documents into chunks
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=1000,
+                    chunk_overlap=200
+                )
+                chunks = text_splitter.split_documents(documents)
+                
+                # Ensure all chunks have product information
+                for chunk in chunks:
+                    if "product" not in chunk.metadata:
+                        chunk.metadata["product"] = product
+                
+                # Store chunks in the main product directory
+                main_vectorstore = Chroma(
+                    persist_directory=os.path.join(self.chroma_dir, product),
+                    embedding_function=embeddings
+                )
+                
+                # Also store in the product_urls directory for backup/separate access
+                url_vectorstore = Chroma(
+                    persist_directory=os.path.join(self.chroma_dir, f"{product}_urls"),
+                    embedding_function=embeddings
+                )
 
-            # Add documents to both vector stores
-            logger.info(f"Adding {len(chunks)} URL chunks to main vectorstore for product '{product}'")
-            main_vectorstore.add_documents(chunks)
-            
-            logger.info(f"Adding {len(chunks)} URL chunks to URL-specific vectorstore")
-            url_vectorstore.add_documents(chunks)
+                # Add documents to both vector stores
+                logger.info(f"Adding {len(chunks)} URL chunks to main vectorstore for product '{product}'")
+                main_vectorstore.add_documents(chunks)
+                
+                logger.info(f"Adding {len(chunks)} URL chunks to URL-specific vectorstore")
+                url_vectorstore.add_documents(chunks)
+                
+                total_chunks += len(chunks)
             
             # Update statistics
-            processing_stats["chunks_stored"] = len(chunks)
+            processing_stats["chunks_stored"] = total_chunks
             
             return {
                 "success": True,
                 "processing_stats": processing_stats,
                 "failed": failed_urls,
                 "details": {
-                    "product": product,
+                    "products_detected": processing_stats["products_detected"],
                     "pages_processed": processing_stats["pages_processed"],
                     "chunks_stored": processing_stats["chunks_stored"]
                 }

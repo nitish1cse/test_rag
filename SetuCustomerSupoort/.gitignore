@@ -13,6 +13,8 @@ data/
 chroma_db/
 *.db
 *.key
+gradio_temp/
+secure_config.db
 
 # IDE
 .vscode/
@@ -28,6 +30,7 @@ ENV/
 
 # IDE specific files
 .DS_Store
+Thumbs.db
 
 # Project specific
 product_docs.json
@@ -65,4 +68,26 @@ target/
 data/secrets.db
 
 # Secrets and keys
-data/secret.key 
+data/secret.key
+
+# Frontend
+setu-docs-frontend/node_modules/
+setu-docs-frontend/.pnp
+setu-docs-frontend/.pnp.js
+setu-docs-frontend/coverage
+setu-docs-frontend/build
+setu-docs-frontend/.DS_Store
+setu-docs-frontend/.env.local
+setu-docs-frontend/.env.development.local
+setu-docs-frontend/.env.test.local
+setu-docs-frontend/.env.production.local
+setu-docs-frontend/npm-debug.log*
+setu-docs-frontend/yarn-debug.log*
+setu-docs-frontend/yarn-error.log*
+
+# Temporary files
+.tmp/
+tmp/
+temp/
+*.swp
+*~ 

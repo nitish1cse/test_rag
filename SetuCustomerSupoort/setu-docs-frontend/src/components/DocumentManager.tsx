@@ -40,6 +40,11 @@ export const DocumentManager: React.FC = () => {
     document_count: number;
     status: string;
   } | null>(null);
+  
+  // GitHub Repository state
+  const [githubRepoUrl, setGithubRepoUrl] = useState('');
+  const [githubFolders, setGithubFolders] = useState('');
+  const [githubToken, setGithubToken] = useState('');
 
   useEffect(() => {
     loadProducts();
@@ -99,6 +104,25 @@ export const DocumentManager: React.FC = () => {
       setUrls('');
     }
   };
+  
+  const handleFetchGithubContent = async () => {
+    if (!githubRepoUrl.trim() || !githubFolders.trim()) return;
+    
+    setLoading(true);
+    const response = await documentService.fetchGithubContent(
+      githubRepoUrl.trim(),
+      githubFolders.trim(),
+      githubToken.trim() || undefined
+    );
+    setLoading(false);
+    
+    if (response.error) {
+      setStatus(`Error: ${response.error}`);
+    } else {
+      setStatus(response.data?.message || 'GitHub content fetched successfully');
+      // Don't clear the fields to allow multiple fetches from same repo
+    }
+  };
 
   const getDocumentStats = async () => {
     if (!statsProduct) return;
@@ -120,6 +144,7 @@ export const DocumentManager: React.FC = () => {
       <Tabs value={tabValue} onChange={(_, newValue) => setTabValue(newValue)} sx={{ mb: 3 }}>
         <Tab label="Confluence Documents" />
         <Tab label="URL Documents" />
+        <Tab label="GitHub Repository" />
         <Tab label="Document Statistics" />
       </Tabs>
 
@@ -210,8 +235,62 @@ export const DocumentManager: React.FC = () => {
           </Grid>
         </Paper>
       )}
-
+      
       {tabValue === 2 && (
+        <Paper sx={{ p: 3 }}>
+          <Typography variant="h6" gutterBottom>
+            Import From GitHub Repository
+          </Typography>
+          
+          <Grid container spacing={2}>
+            <Grid item xs={12}>
+              <TextField
+                fullWidth
+                label="GitHub Repository URL"
+                placeholder="e.g., https://github.com/SetuHQ/docs"
+                value={githubRepoUrl}
+                onChange={(e) => setGithubRepoUrl(e.target.value)}
+                helperText="Enter the GitHub repository URL containing Setu documentation"
+              />
+            </Grid>
+            <Grid item xs={12}>
+              <TextField
+                fullWidth
+                label="Folders to Fetch (comma-separated)"
+                placeholder="e.g., content, content/payments, content/data"
+                value={githubFolders}
+                onChange={(e) => setGithubFolders(e.target.value)}
+                helperText="Specify which folders to fetch MDX files from"
+              />
+            </Grid>
+            <Grid item xs={12}>
+              <TextField
+                fullWidth
+                label="GitHub Token (Optional)"
+                placeholder="ghp_xxxxxxxxxx"
+                value={githubToken}
+                onChange={(e) => setGithubToken(e.target.value)}
+                helperText="Provide a GitHub token to avoid rate limits (optional but recommended)"
+                type="password"
+              />
+            </Grid>
+            <Grid item xs={12}>
+              <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
+                This will automatically fetch all .mdx files from the specified folders and detect the appropriate product for each file. The detection is based on file structure and content analysis.
+              </Typography>
+              <Button
+                variant="contained"
+                onClick={handleFetchGithubContent}
+                disabled={loading || !githubRepoUrl.trim() || !githubFolders.trim()}
+              >
+                {loading ? <CircularProgress size={24} /> : 'Fetch GitHub Content'}
+              </Button>
+            </Grid>
+          </Grid>
+        </Paper>
+      )}
+
+      {tabValue === 3 && (
         <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>
             Document Statistics
@@ -267,7 +346,7 @@ export const DocumentManager: React.FC = () => {
 
       {status && (
         <Alert
-          severity={status.startsWith('Error') ? 'error' : 'success'}
+          severity={status.toLowerCase().includes('error') ? 'error' : 'success'}
           sx={{ mt: 3 }}
           onClose={() => setStatus(null)}
         >

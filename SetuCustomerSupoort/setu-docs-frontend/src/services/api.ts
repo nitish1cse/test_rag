@@ -201,6 +201,32 @@ export const documentService = {
       method: 'POST',
       body: JSON.stringify({ product, urls }),
     }),
+    
+  fetchGithubContent: (repoUrl: string, folders: string, token?: string) =>
+    apiRequest<{ 
+      message: string;
+      details: {
+        processing_stats: {
+          files_processed: number;
+          successful: number;
+          failed: number;
+          chunks_stored: number;
+        };
+        failed_files: Array<{
+          file?: string;
+          folder?: string;
+          reason: string;
+        }>;
+        products_detected: Record<string, number>;
+      }
+    }>('/url/github', {
+      method: 'POST',
+      body: JSON.stringify({ 
+        repo_url: repoUrl, 
+        folders,
+        token 
+      }),
+    }),
 
   getDocumentStats: (product: string) =>
     apiRequest<{ document_count: number; status: string }>(`/confluence/documents/${product}`, {
