@@ -4,7 +4,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
 import config
-from db.storage import retrieve_secret
+from services.secret_store import retrieve_secret
 from typing import List, Optional
 from langchain.docstore.document import Document
 import chromadb
@@ -185,22 +185,38 @@ class VectorStore:
         )
         
     def search(self, query: str, product_code: str, k: int = 3) -> List[Document]:
-        collection = self.client.get_collection(name=product_code)
-        results = collection.query(
-            query_texts=[query],
-            n_results=k
-        )
-        
-        # Convert results to Documents
-        documents = []
-        for i, text in enumerate(results['documents'][0]):
-            doc = Document(
-                page_content=text,
-                metadata=results['metadatas'][0][i]
-            )
-            documents.append(doc)
+        """
+        Search for documents in a specific product collection.
+        Ensures that only documents from the requested product are returned.
+        """
+        try:
+            # Get collection for the specific product
+            collection = self.client.get_collection(name=product_code)
             
-        return documents
+            # Query the specific product collection
+            results = collection.query(
+                query_texts=[query],
+                n_results=k
+            )
+            
+            # Convert results to Documents
+            documents = []
+            for i, text in enumerate(results['documents'][0]):
+                # Ensure metadata includes the product code
+                metadata = results['metadatas'][0][i] if i < len(results['metadatas'][0]) else {}
+                if 'product' not in metadata:
+                    metadata['product'] = product_code
+                    
+                doc = Document(
+                    page_content=text,
+                    metadata=metadata
+                )
+                documents.append(doc)
+                
+            return documents
+        except Exception as e:
+            print(f"Error searching for documents in product {product_code}: {e}")
+            return []
 
     def get_collection_stats(self, product_code: str) -> dict:
         try:

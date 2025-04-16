@@ -1,33 +1,46 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from typing import Optional
 from services.secret_store import store_secret, retrieve_secret
-import logging
+from openai import OpenAI
 
-router = APIRouter(prefix="/openai", tags=["OpenAI"])
-logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/openai", tags=["openai"])
 
-class OpenAIConfig(BaseModel):
+class APIKeyRequest(BaseModel):
     api_key: str
 
-@router.post("/api-key")
-async def set_openai_api_key(config: OpenAIConfig):
-    """Configure OpenAI API key"""
+@router.get("/api-key")
+async def get_api_key() -> dict:
+    """Get OpenAI API key status"""
     try:
-        if not store_secret("OPENAI_API_KEY", config.api_key):
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to store OpenAI API key"
-            )
-        return {"message": "OpenAI API key configured successfully"}
+        api_key = retrieve_secret("openai_api_key")
+        if not api_key:
+            return {"status": "not_configured", "message": "API key not found"}
+        
+        # Test the key
+        client = OpenAI(api_key=api_key)
+        try:
+            client.models.list()
+            return {"status": "configured", "message": "API key is valid"}
+        except Exception as e:
+            return {"status": "invalid", "message": f"API key is invalid: {str(e)}"}
+            
     except Exception as e:
-        logger.error(f"Error configuring OpenAI API key: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "error", "message": str(e)}
 
-@router.get("/api-key/status")
-async def check_api_key_status():
-    """Check if OpenAI API key is configured"""
-    api_key = retrieve_secret("OPENAI_API_KEY")
-    return {
-        "configured": bool(api_key),
-        "status": "API key is configured" if api_key else "API key is not configured"
-    }
+@router.post("/api-key")
+async def set_api_key(request: APIKeyRequest) -> dict:
+    """Store OpenAI API key"""
+    try:
+        # Validate the API key
+        client = OpenAI(api_key=request.api_key)
+        try:
+            client.models.list()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid API key: {str(e)}")
+        
+        # Store the key
+        store_secret("openai_api_key", request.api_key)
+        return {"status": "success", "message": "API key stored successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

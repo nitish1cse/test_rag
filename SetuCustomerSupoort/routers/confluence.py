@@ -121,31 +121,6 @@ async def store_documents(request: DocumentRequest) -> Dict:
         logger.error(f"Error in store_documents: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/products")
-async def get_products() -> Dict:
-    """Get all products and their document counts"""
-    products = {}
-    for product in product_service.get_all_products():
-        doc_ids = product_service.get_product_docs(product)
-        products[product] = {
-            "document_count": len(doc_ids),
-            "document_ids": doc_ids
-        }
-    return {"products": products}
-
-@router.get("/products/{product}")
-async def get_product_docs(product: str) -> Dict:
-    """Get document IDs for a specific product"""
-    if product not in product_service.get_all_products():
-        raise HTTPException(status_code=404, detail=f"Product not found: {product}")
-    
-    doc_ids = product_service.get_product_docs(product)
-    return {
-        "product": product,
-        "document_count": len(doc_ids),
-        "document_ids": doc_ids
-    }
-
 @router.get("/documents/{product}")
 async def get_document_stats(product: str) -> Dict:
     """Get document statistics for a product"""
@@ -168,7 +143,17 @@ async def get_document_stats(product: str) -> Dict:
         }
     except Exception as e:
         logger.error(f"Error getting document stats for {product}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "product": product,
+            "document_count": 0,
+            "status": f"Error: {str(e)}"
+        }
+
+
+
+
+
+
 
 
 
