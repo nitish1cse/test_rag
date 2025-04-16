@@ -361,7 +361,45 @@ class URLDocStore:
         except Exception as e:
             logger.error(f"Error adding document to vectorstore: {e}")
             return 0
+
+    def add_documents_to_vectorstore(self, documents: List[Document], product: str) -> int:
+        """Add multiple documents to the vector store in a batch for better performance"""
+        try:
+            if not documents:
+                return 0
+                
+            # Split all documents into chunks
+            chunks = self.text_splitter.split_documents(documents)
             
+            if not chunks:
+                logger.warning(f"No chunks created for {len(documents)} documents")
+                return 0
+                
+            # Get the vectorstore for this product
+            vectorstore = self.get_vectorstore(product)
+            
+            # Ensure all chunks have the product metadata
+            for chunk in chunks:
+                if 'product' not in chunk.metadata:
+                    chunk.metadata['product'] = product
+            
+            # Add chunks to vectorstore in a single batch operation
+            vectorstore.add_documents(chunks)
+            
+            # Also add to the central VectorStore used by QA
+            from services.vectorstore import VectorStore
+            qa_vectorstore = VectorStore()
+            
+            # Add to the QA vectorstore in a single batch operation
+            qa_vectorstore.add_documents(chunks, product)
+            
+            logger.info(f"Added {len(chunks)} chunks to vectorstore for product {product} in batch mode")
+            return len(chunks)
+            
+        except Exception as e:
+            logger.error(f"Error adding documents to vectorstore in batch: {e}")
+            return 0
+
     def detect_product_from_content(self, content: str) -> Optional[str]:
         """Detect the product from the content using keyword matching"""
         try:

@@ -14,6 +14,7 @@ import { Chat } from './components/Chat';
 import { ConfigurationPanel } from './components/ConfigurationPanel';
 import { DocumentManager } from './components/DocumentManager';
 import { ServerStatus } from './components/ServerStatus';
+import { SlackManager } from './components/SlackManager';
 
 const theme = createTheme({
   palette: {
@@ -45,6 +46,7 @@ const App: React.FC = () => {
               <Tab label="CHAT" />
               <Tab label="CONFIGURATION" />
               <Tab label="DOCUMENT CONFIGURATION" />
+              <Tab label="SLACK INTEGRATION" />
             </Tabs>
           </Box>
         </AppBar>
@@ -55,6 +57,7 @@ const App: React.FC = () => {
           {tabValue === 0 && <Chat />}
           {tabValue === 1 && <ConfigurationPanel />}
           {tabValue === 2 && <DocumentManager />}
+          {tabValue === 3 && <SlackManager />}
         </Box>
       </Box>
     </ThemeProvider>

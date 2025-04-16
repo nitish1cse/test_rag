@@ -17,7 +17,26 @@ async function apiRequest<T>(
     const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(data.detail || 'An error occurred');
+      // Improved error formatting
+      let errorMessage = '';
+      
+      if (data.detail) {
+        if (typeof data.detail === 'string') {
+          errorMessage = data.detail;
+        } else if (Array.isArray(data.detail)) {
+          // Handle validation errors which are typically arrays
+          errorMessage = data.detail.map((err: any) => 
+            `${err.loc?.join('.') || ''}: ${err.msg || JSON.stringify(err)}`
+          ).join('; ');
+        } else {
+          // Handle object format
+          errorMessage = JSON.stringify(data.detail);
+        }
+      } else {
+        errorMessage = `Request failed with status ${response.status}`;
+      }
+      
+      throw new Error(errorMessage);
     }
 
     return { data };
@@ -239,5 +258,133 @@ export const serverService = {
   checkStatus: () =>
     apiRequest<{ status: string }>('/', {
       method: 'GET',
+    }),
+};
+
+// Slack API Service
+export const slackService = {
+  configureApi: (apiToken: string, botToken?: string) => 
+    apiRequest<{ message: string }>('/slack/config', {
+      method: 'POST',
+      body: JSON.stringify({
+        api_token: apiToken,
+        bot_token: botToken,
+      }),
+    }),
+    
+  configureChannel: (channelId: string, product: string, includeThreads: boolean = true, maxMessages: number = 1000, description?: string) =>
+    apiRequest<{ 
+      message: string;
+      channel_id: string;
+      product: string;
+    }>('/slack/channels', {
+      method: 'POST',
+      body: JSON.stringify({
+        channel_id: channelId,
+        product,
+        include_threads: includeThreads,
+        max_messages: maxMessages,
+        description,
+      }),
+    }),
+    
+  listChannels: () =>
+    apiRequest<{ 
+      channels: Array<{
+        channel_id: string;
+        channel_name: string;
+        product: string;
+        description: string;
+        last_processed: string | null;
+      }> 
+    }>('/slack/channels', {
+      method: 'GET',
+    }),
+    
+  deleteChannel: (channelId: string) =>
+    apiRequest<{ 
+      message: string;
+      product: string;
+    }>(`/slack/channels/${channelId}`, {
+      method: 'DELETE',
+    }),
+    
+  processChannel: (channelId: string, forceFull: boolean = false) =>
+    apiRequest<{ 
+      message: string;
+      product: string;
+      messages_processed: number;
+      chunks_stored: number;
+    }>(`/slack/process/${channelId}?force_full=${forceFull}`, {
+      method: 'POST',
+    }),
+    
+  processAllChannels: (forceFull: boolean = false) =>
+    apiRequest<{ 
+      message: string;
+      results: Record<string, {
+        success: boolean;
+        messages_processed?: number;
+        chunks_stored?: number;
+        error?: string;
+      }>;
+    }>(`/slack/process/all?force_full=${forceFull}`, {
+      method: 'POST',
+    }),
+
+  getLogs: (lines: number = 100) =>
+    apiRequest<{ 
+      message: string;
+      logs: string[];
+    }>(`/slack/logs?lines=${lines}`, {
+      method: 'GET',
+    }),
+    
+  getRateLimits: () =>
+    apiRequest<{
+      settings: {
+        batch_size: number;
+        batch_delay: number;
+        channel_delay: number;
+        failure_delay: number;
+        max_retries: number;
+        initial_backoff: number;
+        max_backoff: number;
+      }
+    }>('/slack/rate-limits', {
+      method: 'GET',
+    }),
+    
+  configureRateLimits: (
+    batchSize: number, 
+    batchDelay: number, 
+    channelDelay: number, 
+    failureDelay: number,
+    maxRetries: number = 5,
+    initialBackoff: number = 1,
+    maxBackoff: number = 60
+  ) =>
+    apiRequest<{
+      message: string;
+      settings: {
+        batch_size: number;
+        batch_delay: number;
+        channel_delay: number;
+        failure_delay: number;
+        max_retries: number;
+        initial_backoff: number;
+        max_backoff: number;
+      }
+    }>('/slack/rate-limits', {
+      method: 'POST',
+      body: JSON.stringify({
+        batch_size: batchSize,
+        batch_delay: batchDelay,
+        channel_delay: channelDelay,
+        failure_delay: failureDelay,
+        max_retries: maxRetries,
+        initial_backoff: initialBackoff,
+        max_backoff: maxBackoff
+      }),
     }),
 };

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import openai, qa, confluence, url, config
+from routers import openai, qa, confluence, url, config, slack
 from datetime import datetime
 import config as app_config
 from services.secret_store import retrieve_secret
@@ -22,6 +22,7 @@ app.include_router(qa.router)
 app.include_router(confluence.router)
 app.include_router(url.router)
 app.include_router(config.router)
+app.include_router(slack.router)
 
 @app.get("/")
 async def root():
