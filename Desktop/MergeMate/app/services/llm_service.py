@@ -407,7 +407,7 @@ class LLMService:
             acceptance_criteria: List of acceptance criteria
             
         Returns:
-            Dict[str, Any]: Review results
+            Dict[str, Any]: Review results including structured review and inline comments
         """
         app_logger.info(
             "Starting code review",
@@ -428,33 +428,48 @@ class LLMService:
             )
             
             # Review each chunk
-            reviews = []
+            chunk_reviews = []
+            all_inline_comments = []
+            
             for i, chunk in enumerate(chunks, 1):
                 app_logger.info(
                     "Reviewing chunk {}/{}".format(i, len(chunks)),
                     extra={"chunk_size": len(chunk)}
                 )
-                review = await self._review_chunk(
+                review_result = await self._review_chunk(
                     chunk,
                     jira_context,
                     acceptance_criteria,
                     i,
                     len(chunks)
                 )
-                reviews.append(review)
-            
-            # Merge all chunk reviews
-            final_review = self._merge_reviews(reviews)
+                chunk_reviews.append({
+                    "raw_response": review_result["raw_response"],
+                    "structured_review": review_result["structured_review"]
+                })
+                # Collect inline comments from each chunk
+                if "inline_comments" in review_result and review_result["inline_comments"]:
+                    all_inline_comments.extend(review_result["inline_comments"])
+
+            # Merge structured reviews from all chunks
+            final_structured_review = self._merge_reviews(chunk_reviews) # This now only merges structured parts
             
             app_logger.info(
                 "Code review completed successfully",
                 extra={
                     "jira_id": jira_context.get("id"),
                     "num_chunks": len(chunks),
-                    "review_summary": final_review["structured_review"]["summary"][:100] + "..."
+                    "review_summary_preview": final_structured_review["structured_review"]["summary"][:100] + "...",
+                    "total_inline_comments": len(all_inline_comments)
                 }
             )
-            return final_review
+            
+            # Return both the merged structured review and all collected inline comments
+            return {
+                "raw_response": final_structured_review["raw_response"], # Still include raw response for overall view
+                "structured_review": final_structured_review["structured_review"],
+                "inline_comments": all_inline_comments # Return collected inline comments
+            }
             
         except Exception as e:
             app_logger.error(
@@ -475,7 +490,7 @@ class LLMService:
         #     str: The review response from OpenAI
         # Raises:
         #     Exception: If the OpenAI request fails
-        
+
         # Log request details including token estimates
         app_logger.debug(
             "Requesting review from OpenAI",
@@ -488,7 +503,7 @@ class LLMService:
         try:
             # Estimate tokens in the prompt (rough estimate: 4 chars ≈ 1 token)
             estimated_tokens = len(prompt) // 4
-            
+
             # Check if prompt exceeds context limit
             if estimated_tokens > self.config.max_context_tokens:
                 app_logger.warning(
@@ -501,10 +516,10 @@ class LLMService:
                 # Truncate the prompt if necessary, preserving the most important parts
                 max_chars = self.config.max_context_tokens * 4
                 prompt = prompt[:max_chars] + "\n\n[Content truncated due to length]"
-            
+
             # Get model-specific parameters
             model_params = self.config.get_model_params()
-            
+
             # Prepare messages based on model capabilities
             if self.config.model == "o1-mini":
                 # o1-mini doesn't support system role, so we'll prepend the system message
@@ -517,6 +532,15 @@ class LLMService:
                 ]
                 # For o1-mini, we need to use the raw API parameters
                 # The client library doesn't support max_completion_tokens directly
+                # Also, o1-mini only supports temperature=1.0 (handled in get_model_params)
+
+                app_logger.debug("Making OpenAI API call for o1-mini", extra={
+                    "model": self.config.model,
+                    "messages": messages,
+                    "temperature": model_params["temperature"],
+                    "extra_body": {"max_completion_tokens": model_params["max_completion_tokens"]}
+                })
+
                 response = self.client.chat.completions.create(
                     model=self.config.model,
                     messages=messages,
@@ -531,24 +555,49 @@ class LLMService:
                     {"role": "system", "content": "You are an expert code reviewer."},
                     {"role": "user", "content": prompt}
                 ]
-                # Use standard parameters for other models
+                # Use standard parameters for other models (handled in get_model_params)
+
+                app_logger.debug("Making OpenAI API call for other model", extra={
+                    "model": self.config.model,
+                    "messages": messages,
+                    "max_tokens": model_params["max_tokens"],
+                    "temperature": model_params["temperature"]
+                })
+
                 response = self.client.chat.completions.create(
                     model=self.config.model,
                     messages=messages,
                     max_tokens=model_params["max_tokens"],
                     temperature=model_params["temperature"]
                 )
-            
-            # Log successful response
+
+            # Log successful response details
             app_logger.debug(
                 "Received response from OpenAI",
                 extra={
                     "model": self.config.model,
-                    "response_length": len(response.choices[0].message.content),
-                    "model_params": model_params
+                    "response_id": getattr(response, 'id', 'N/A'), # Log response ID if available
+                    "response_object": getattr(response, 'object', 'N/A'), # Log response object type
+                    "response_created": getattr(response, 'created', 'N/A'), # Log creation timestamp
+                    "response_model": getattr(response, 'model', 'N/A'), # Log model used in response
+                    "response_usage": getattr(response, 'usage', 'N/A'), # Log token usage
+                    "response_choices_count": len(response.choices) if hasattr(response, 'choices') else 0, # Log number of choices
+                    "response_first_choice_finish_reason": getattr(response.choices[0], 'finish_reason', 'N/A') if hasattr(response, 'choices') and response.choices else 'N/A', # Log finish reason of first choice
+                    "response_first_choice_message_content": getattr(response.choices[0].message, 'content', '')[:200] + '...' if hasattr(response, 'choices') and response.choices and hasattr(response.choices[0], 'message') and hasattr(response.choices[0].message, 'content') else '' # Log preview of content
                 }
             )
-            return response.choices[0].message.content
+
+            # Return the content of the first choice's message
+            if response.choices and response.choices[0].message and response.choices[0].message.content:
+                 return response.choices[0].message.content
+            else:
+                 app_logger.warning("OpenAI response is missing expected content", extra={
+                     "response_id": getattr(response, 'id', 'N/A'),
+                     "response_object": getattr(response, 'object', 'N/A'),
+                     "response_choices_count": len(response.choices) if hasattr(response, 'choices') else 0
+                 })
+                 return "" # Return empty string if content is missing
+
         except Exception as e:
             # Log and re-raise any errors
             app_logger.error(
@@ -556,7 +605,8 @@ class LLMService:
                 extra={
                     "error": str(e),
                     "model": self.config.model,
-                    "model_params": model_params if 'model_params' in locals() else None
+                    "model_params": model_params if 'model_params' in locals() else None,
+                    "prompt_length": len(prompt) # Include prompt length in error logs
                 },
                 exc_info=True
             )
@@ -618,7 +668,7 @@ class LLMService:
             response: The raw response from the LLM
             
         Returns:
-            Dict[str, Any]: Structured review with sections
+            Dict[str, Any]: Structured review with sections and inline comments
         """
         app_logger.debug(
             "Parsing review response",
@@ -638,9 +688,9 @@ class LLMService:
                     "issues": "No review content was generated.",
                     "security": "No review content was generated.",
                     "suggestions": "No review content was generated.",
-                    "acceptance_check": "No review content was generated.",
-                    "inline_comments": "No inline comments were generated."
-                }
+                    "acceptance_check": "No review content was generated."
+                },
+                "inline_comments": [] # Return empty list for inline comments
             }
             
         sections = {
@@ -650,89 +700,143 @@ class LLMService:
             "issues": "",
             "security": "",
             "suggestions": "",
-            "acceptance_check": "",
-            "inline_comments": ""
+            "acceptance_check": ""
         }
         
         current_section = None
         section_content = []
         in_code_block = False
         current_file = None
-        inline_comments = []
+        # Store parsed inline comments with file and line info
+        parsed_inline_comments = [] 
+        current_comment_lines = []
+        current_line_info = None # Store line number/range for the current comment
         
         for line in response.split("\n"):
             # Handle code blocks for inline comments
-            if line.startswith("```"):
-                in_code_block = not in_code_block
-                if not in_code_block and current_file:
-                    # End of a file's inline comments
-                    if section_content:
-                        inline_comments.append({
+            if line.strip() == "```":
+                if in_code_block:
+                    # End of an inline comments code block
+                    # Add any remaining comments from the last file
+                    if current_file and current_comment_lines:
+                        parsed_inline_comments.append({
                             "file": current_file,
-                            "comments": "\n".join(section_content)
+                            "line": current_line_info, # Can be None, single int, or range string
+                            "comment": "\n".join(current_comment_lines).strip()
                         })
                     current_file = None
-                    section_content = []
+                    current_comment_lines = []
+                    current_line_info = None
+                in_code_block = not in_code_block
                 continue
                 
             if in_code_block:
-                if line.startswith("File: "):
-                    if current_file and section_content:
-                        # Save previous file's comments
-                        inline_comments.append({
+                # Parse file path and line information within the code block
+                if line.strip().startswith("File: "):
+                    if current_file and current_comment_lines:
+                         # Save comments from the previous file/section before starting a new one
+                        parsed_inline_comments.append({
                             "file": current_file,
-                            "comments": "\n".join(section_content)
+                            "line": current_line_info,
+                            "comment": "\n".join(current_comment_lines).strip()
                         })
-                    current_file = line[6:].strip()
-                    section_content = []
+                    current_file = line.strip()[6:].strip()
+                    current_comment_lines = []
+                    current_line_info = None # Reset line info for the new file
+                elif current_file and (line.strip().startswith("Line ") or line.strip().startswith("Lines ")):
+                     if current_comment_lines:
+                         # Save the previous comment before starting a new one for a different line
+                         parsed_inline_comments.append({
+                            "file": current_file,
+                            "line": current_line_info,
+                            "comment": "\n".join(current_comment_lines).strip()
+                        })
+                     # Extract line number or range
+                     line_info_str = line.strip()[len("Line "):].strip()
+                     if '-' in line_info_str:
+                         current_line_info = line_info_str # Store as range string
+                     else:
+                          try:
+                              current_line_info = int(line_info_str.split(":")[0]) # Store as int
+                          except ValueError:
+                              current_line_info = line_info_str # Store as string if not simple int
+
+                     current_comment_lines = [line.strip().split(":", 1)[1].strip()] if ':' in line.strip() else []
+
                 elif current_file:
-                    section_content.append(line)
+                    # Add lines within the current file/comment section
+                    current_comment_lines.append(line)
                 continue
             
             # Handle regular sections
             if line.startswith("## "):
                 if current_section:
                     sections[current_section] = "\n".join(section_content).strip()
-                current_section = line[3:].lower().replace(" ", "_")
-                section_content = []
+                # Ignore the inline comments section header for general review body
+                if line.strip() != "## Inline Comments":
+                    current_section = line[3:].lower().replace(" ", "_")
+                    section_content = []
+                else:
+                    current_section = None # Don't add inline comments section to general review
+                    section_content = []
             elif current_section:
                 section_content.append(line)
                 
+        # Add any remaining content from the last section (if not inline comments block)
         if current_section:
             sections[current_section] = "\n".join(section_content).strip()
             
-        # Add any remaining inline comments
-        if current_file and section_content:
-            inline_comments.append({
-                "file": current_file,
-                "comments": "\n".join(section_content)
-            })
-            
-        # Format inline comments section
-        if inline_comments:
-            sections["inline_comments"] = "\n\n".join([
-                f"### {comment['file']}\n{comment['comments']}"
-                for comment in inline_comments
-            ])
-            
-        # Log the parsed sections
+        # Add any remaining inline comments from the last file block
+        if in_code_block and current_file and current_comment_lines:
+             parsed_inline_comments.append({
+                 "file": current_file,
+                 "line": current_line_info,
+                 "comment": "\n".join(current_comment_lines).strip()
+             })
+             
+        # Log the parsed sections and inline comments
         app_logger.debug(
             "Review response parsed",
             extra={
                 "sections": {k: len(v) for k, v in sections.items()},
                 "has_content": any(len(v) > 0 for v in sections.values()),
-                "num_inline_comments": len(inline_comments)
+                "num_inline_comments": len(parsed_inline_comments),
+                "inline_comments_preview": parsed_inline_comments[:5] # Log a preview of parsed inline comments
             }
         )
         
-        # If no sections were found, treat the entire response as a summary
+        # If no sections were found (excluding inline comments section), treat the entire response (excluding inline comments block) as a summary
+        # Find the start and end of the inline comments block to exclude it from the general summary fallback
+        response_lines = response.split("\n")
+        inline_block_start = -1
+        inline_block_end = -1
+        
+        for i, line in enumerate(response_lines):
+            if line.strip() == "## Inline Comments":
+                inline_block_start = i
+                # Find the next ``` after ## Inline Comments to mark the end of the structured inline comments block
+                for j in range(i + 1, len(response_lines)):
+                     if response_lines[j].strip() == "```":
+                         inline_block_end = j
+                         break
+                break # Found the inline block header and attempted to find its end
+        
+        general_review_content = []
+        for i, line in enumerate(response_lines):
+             # Include lines that are not part of the inline comments block or its header
+             if not (inline_block_start <= i <= inline_block_end or (inline_block_start != -1 and i > inline_block_end and response_lines[i].strip() == "```")):
+                 general_review_content.append(line)
+
         if not any(sections.values()):
-            app_logger.warning("No sections found in review response, treating as summary")
-            sections["summary"] = response.strip()
-            
+            app_logger.warning("No structured sections found in review response (excluding inline comments), treating remaining content as summary")
+            # Use the content outside the inline comments block as the summary fallback
+            sections["summary"] = "\n".join(general_review_content).strip()
+
+
         return {
             "raw_response": response,
-            "structured_review": sections
+            "structured_review": sections,
+            "inline_comments": parsed_inline_comments # Return parsed inline comments separately
         }
 
     async def check_connection(self) -> Dict[str, Any]:
